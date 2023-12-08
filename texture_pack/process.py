@@ -32,11 +32,14 @@ def main():
    if root_dir is None or not os.path.exists(root_dir):
       raise ValueError(f"Could not find root_dir '{root_dir}', make sure the env var is set to a valid version root folder")
 
-   save_dir = f"texture_pack/{texture_dir}"
+   save_dir = f"texture_pack/sdmc/{texture_dir}"
    if not os.path.exists(save_dir):
       os.makedirs(save_dir)
 
-   for filename in sorted(os.listdir(f"{root_dir}/{texture_dir}")):
+   all_filenames = os.listdir(f"{root_dir}/{texture_dir}")
+   all_filenames = [f for f in all_filenames if any(f.startswith(c) for c in ['s', 't'])]
+
+   for filename in sorted(all_filenames):
       if not filename.endswith(".png"):
          continue
 

@@ -175,22 +175,12 @@ class CrossAttention:
     self.to_out = [Linear(n_heads*d_head, query_dim)]
 
   def __call__(self, x:Tensor, context:Optional[Tensor]=None) -> Tensor:
-    if context is None:
-      context = x
-      q,k,v = self.to_q(x), self.to_k(context), self.to_v(context)
-      q,k,v = [y.reshape(*x.shape[0:-2], -1, self.num_heads, self.head_size).transpose(1,2) for y in (q,k,v)]
-      attention = Tensor.scaled_dot_product_attention(q, k, v).transpose(1,2)
-      h_ = attention.reshape(x.shape[0], -1, self.num_heads * self.head_size)
-      return h_.sequential(self.to_out)
-    else:
-      b,h,w,t,c = context.shape
-      context = context.reshape(b,h*w,t,c)
-      x_ = x.reshape((*x.shape[:2],1,x.shape[-1]))
-      q,k,v = self.to_q(x_), self.to_k(context), self.to_v(context)
-      q,k,v = [y.reshape(*x_.shape[0:-2], -1, self.num_heads, self.head_size).permute(0,3,1,2,4) for y in (q,k,v)]
-      h_ = (q @ k.transpose(-2,-1) / math.sqrt(q.shape[-1])).softmax(-1) @ v
-      h_ = h_.permute(0,2,3,1,4).reshape((x.shape[0],-1,self.num_heads*self.head_size))
-      return h_.sequential(self.to_out)
+    context = x if context is None else context
+    q,k,v = self.to_q(x), self.to_k(context), self.to_v(context)
+    q,k,v = [y.reshape(x.shape[0], -1, self.num_heads, self.head_size).transpose(1,2) for y in (q,k,v)]
+    attention = Tensor.scaled_dot_product_attention(q, k, v).transpose(1,2)
+    h_ = attention.reshape(x.shape[0], -1, self.num_heads * self.head_size)
+    return h_.sequential(self.to_out)
 
 class GEGLU:
   def __init__(self, dim_in, dim_out):
@@ -321,15 +311,9 @@ class UNetModel:
     t_emb = timestep_embedding(timesteps, 320)
     emb = t_emb.sequential(self.time_embed)
 
-    assert context is not None
-    contexts: List[Tensor] = [context]
-    for _ in range(3):
-      b,h,w,t,c = contexts[-1].shape
-      contexts.append( contexts[-1].reshape(b,2,h//2,w,t,c).sum(axis=1).reshape(b,h//2,2,w//2,t,c).sum(axis=2).div(4) )
-
     def run(x, bb):
       if isinstance(bb, ResBlock): x = bb(x, emb)
-      elif isinstance(bb, SpatialTransformer): x = bb(x, contexts[bb.index])
+      elif isinstance(bb, SpatialTransformer): x = bb(x, context)
       else: x = bb(x)
       return x
 
@@ -607,31 +591,20 @@ if __name__ == "__main__":
   args = parser.parse_args()
 
   Tensor.no_grad = True
-  if args.fp16: Tensor.default_type = dtypes.float16
+  # if args.fp16: Tensor.default_type = dtypes.float16
   model = StableDiffusion()
 
   # load in weights
   load_state_dict(model, torch_load(fetch('https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/resolve/main/sd-v1-4.ckpt', 'sd-v1-4.ckpt'))['state_dict'], strict=False, fp16=args.fp16)
 
-  # # run through CLIP to get context
-  # tokenizer = ClipTokenizer()
-  # prompt = Tensor([tokenizer.encode(args.prompt)])
-  # context = model.cond_stage_model.transformer.text_model(prompt).realize()
-  # print("got CLIP context", context.shape)
-
-  # b c h w
-
   # run through CLIP to get context
   tokenizer = ClipTokenizer()
-  prompt_l = Tensor([tokenizer.encode("high quality photograph of forest, trees, leaves blowing in the wind, 8k")])
-  context_l: Tensor = model.cond_stage_model.transformer.text_model(prompt_l).realize()
-  prompt_r = Tensor([tokenizer.encode("high quality photograph of ocean, water, waves blowing in the wind, 8k")])
-  context_r: Tensor = model.cond_stage_model.transformer.text_model(prompt_r).realize()
-  context = context_l.reshape((1,1,1,77,768)).expand((1,64,32,77,768)).cat(context_r.reshape((1,1,1,77,768)).expand((1,64,32,77,768)), dim=2)
+  prompt = Tensor([tokenizer.encode(args.prompt)])
+  context = model.cond_stage_model.transformer.text_model(prompt).realize()
   print("got CLIP context", context.shape)
 
   prompt = Tensor([tokenizer.encode("")])
-  unconditional_context = model.cond_stage_model.transformer.text_model(prompt).realize().reshape((1,1,1,77,768)).expand((1,64,64,77,768))
+  unconditional_context = model.cond_stage_model.transformer.text_model(prompt).realize()
   print("got unconditional CLIP context", unconditional_context.shape)
 
   # done with clip model

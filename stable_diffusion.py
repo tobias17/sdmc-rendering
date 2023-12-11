@@ -6,7 +6,7 @@ from pathlib import Path
 import gzip, argparse, math, re
 from functools import lru_cache
 from collections import namedtuple
-from typing import Optional
+from typing import Optional, List
 
 from tqdm import tqdm
 from tinygrad.tensor import Tensor
@@ -16,8 +16,8 @@ from tinygrad.nn import Conv2d, Linear, GroupNorm, LayerNorm, Embedding
 from tinygrad.nn.state import torch_load, load_state_dict, get_state_dict
 from tinygrad.jit import TinyJit
 
-# Device.DEFAULT = "CUDA"
-Device.DEFAULT = "CPU"
+Device.DEFAULT = "CUDA"
+# Device.DEFAULT = "CPU"
 
 class AttnBlock:
   def __init__(self, in_channels):
@@ -228,12 +228,13 @@ class BasicTransformerBlock:
     return x
 
 class SpatialTransformer:
-  def __init__(self, channels, context_dim, n_heads, d_head):
+  def __init__(self, channels, context_dim, n_heads, d_head, index:int):
     self.norm = GroupNorm(32, channels)
     assert channels == n_heads * d_head
     self.proj_in = Conv2d(channels, n_heads * d_head, 1)
     self.transformer_blocks = [BasicTransformerBlock(channels, context_dim, n_heads, d_head)]
     self.proj_out = Conv2d(n_heads * d_head, channels, 1)
+    self.index = index
 
   def __call__(self, x, context=None):
     b, c, h, w = x.shape
@@ -278,36 +279,36 @@ class UNetModel:
     ]
     self.input_blocks = [
       [Conv2d(4, 320, kernel_size=3, padding=1)],
-      [ResBlock(320, 1280, 320), SpatialTransformer(320, 768, 8, 40)],
-      [ResBlock(320, 1280, 320), SpatialTransformer(320, 768, 8, 40)],
+      [ResBlock(320, 1280, 320), SpatialTransformer(320, 768, 8, 40, 0)],
+      [ResBlock(320, 1280, 320), SpatialTransformer(320, 768, 8, 40, 0)],
       [Downsample(320)],
-      [ResBlock(320, 1280, 640), SpatialTransformer(640, 768, 8, 80)],
-      [ResBlock(640, 1280, 640), SpatialTransformer(640, 768, 8, 80)],
+      [ResBlock(320, 1280, 640), SpatialTransformer(640, 768, 8, 80, 1)],
+      [ResBlock(640, 1280, 640), SpatialTransformer(640, 768, 8, 80, 1)],
       [Downsample(640)],
-      [ResBlock(640, 1280, 1280), SpatialTransformer(1280, 768, 8, 160)],
-      [ResBlock(1280, 1280, 1280), SpatialTransformer(1280, 768, 8, 160)],
+      [ResBlock(640, 1280, 1280), SpatialTransformer(1280, 768, 8, 160, 2)],
+      [ResBlock(1280, 1280, 1280), SpatialTransformer(1280, 768, 8, 160, 2)],
       [Downsample(1280)],
       [ResBlock(1280, 1280, 1280)],
       [ResBlock(1280, 1280, 1280)]
     ]
     self.middle_block = [
       ResBlock(1280, 1280, 1280),
-      SpatialTransformer(1280, 768, 8, 160),
+      SpatialTransformer(1280, 768, 8, 160, 3),
       ResBlock(1280, 1280, 1280)
     ]
     self.output_blocks = [
       [ResBlock(2560, 1280, 1280)],
       [ResBlock(2560, 1280, 1280)],
       [ResBlock(2560, 1280, 1280), Upsample(1280)],
-      [ResBlock(2560, 1280, 1280), SpatialTransformer(1280, 768, 8, 160)],
-      [ResBlock(2560, 1280, 1280), SpatialTransformer(1280, 768, 8, 160)],
-      [ResBlock(1920, 1280, 1280), SpatialTransformer(1280, 768, 8, 160), Upsample(1280)],
-      [ResBlock(1920, 1280, 640), SpatialTransformer(640, 768, 8, 80)],  # 6
-      [ResBlock(1280, 1280, 640), SpatialTransformer(640, 768, 8, 80)],
-      [ResBlock(960, 1280, 640), SpatialTransformer(640, 768, 8, 80), Upsample(640)],
-      [ResBlock(960, 1280, 320), SpatialTransformer(320, 768, 8, 40)],
-      [ResBlock(640, 1280, 320), SpatialTransformer(320, 768, 8, 40)],
-      [ResBlock(640, 1280, 320), SpatialTransformer(320, 768, 8, 40)],
+      [ResBlock(2560, 1280, 1280), SpatialTransformer(1280, 768, 8, 160, 2)],
+      [ResBlock(2560, 1280, 1280), SpatialTransformer(1280, 768, 8, 160, 2)],
+      [ResBlock(1920, 1280, 1280), SpatialTransformer(1280, 768, 8, 160, 2), Upsample(1280)],
+      [ResBlock(1920, 1280, 640), SpatialTransformer(640, 768, 8, 80, 1)],  # 6
+      [ResBlock(1280, 1280, 640), SpatialTransformer(640, 768, 8, 80, 1)],
+      [ResBlock(960, 1280, 640), SpatialTransformer(640, 768, 8, 80, 1), Upsample(640)],
+      [ResBlock(960, 1280, 320), SpatialTransformer(320, 768, 8, 40, 0)],
+      [ResBlock(640, 1280, 320), SpatialTransformer(320, 768, 8, 40, 0)],
+      [ResBlock(640, 1280, 320), SpatialTransformer(320, 768, 8, 40, 0)],
     ]
     self.out = [
       GroupNorm(32, 320),
@@ -315,14 +316,20 @@ class UNetModel:
       Conv2d(320, 4, kernel_size=3, padding=1)
     ]
 
-  def __call__(self, x, timesteps=None, context=None):
+  def __call__(self, x:Tensor, timesteps:Optional[Tensor]=None, context:Optional[Tensor]=None):
     # TODO: real time embedding
     t_emb = timestep_embedding(timesteps, 320)
     emb = t_emb.sequential(self.time_embed)
 
+    assert context is not None
+    contexts: List[Tensor] = [context]
+    for _ in range(3):
+      b,h,w,t,c = contexts[-1].shape
+      contexts.append( contexts[-1].reshape(b,2,h//2,w,t,c).sum(axis=1).reshape(b,h//2,2,w//2,t,c).sum(axis=2).div(4) )
+
     def run(x, bb):
       if isinstance(bb, ResBlock): x = bb(x, emb)
-      elif isinstance(bb, SpatialTransformer): x = bb(x, context)
+      elif isinstance(bb, SpatialTransformer): x = bb(x, contexts[bb.index])
       else: x = bb(x)
       return x
 
@@ -600,6 +607,7 @@ if __name__ == "__main__":
   args = parser.parse_args()
 
   Tensor.no_grad = True
+  if args.fp16: Tensor.default_type = dtypes.float16
   model = StableDiffusion()
 
   # load in weights

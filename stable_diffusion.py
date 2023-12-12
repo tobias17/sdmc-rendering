@@ -11,9 +11,9 @@ from typing import Optional, List
 from tqdm import tqdm
 from tinygrad.tensor import Tensor
 from tinygrad import Device
-from tinygrad.helpers import dtypes, GlobalCounters, Timing, Context, getenv, fetch
+from tinygrad.helpers import dtypes, GlobalCounters, Timing, Context, getenv, fetch, DEBUG, CI
 from tinygrad.nn import Conv2d, Linear, GroupNorm, LayerNorm, Embedding
-from tinygrad.nn.state import torch_load, load_state_dict, get_state_dict, safe_load
+from tinygrad.nn.state import torch_load, load_state_dict, get_state_dict, safe_load, safe_save
 from tinygrad.jit import TinyJit
 
 Device.DEFAULT = "CUDA"
@@ -539,12 +539,11 @@ class StableDiffusion:
 
    def get_model_output(self, unconditional_context, context, latent, timestep, unconditional_guidance_scale):
       # put into diffuser
-      ctx = unconditional_context.cat(*context, dim=0)
-      latents = self.model.diffusion_model(latent.expand(ctx.shape[0], *latent.shape[1:]), timestep, ctx)
-      unconditional_latent, latent_all = latents[0:1], latents[1:]
+      latents = self.model.diffusion_model(latent.expand(2, *latent.shape[1:]), timestep, unconditional_context.cat(context, dim=0))
+      unconditional_latent, latent = latents[0:1], latents[1:2]
 
-      e_ts = [unconditional_latent + unconditional_guidance_scale * (latent - unconditional_latent) for latent in latent_all]
-      return e_ts
+      e_t = unconditional_latent + unconditional_guidance_scale * (latent - unconditional_latent)
+      return e_t
 
    def decode(self, x):
       x = self.first_stage_model.post_quant_conv(1/0.18215 * x)
@@ -555,11 +554,9 @@ class StableDiffusion:
       x = x.reshape(3,512,512).permute(1,2,0).clip(0,1)*255
       return x.cast(dtypes.uint8) if Device.DEFAULT != "WEBGPU" else x
 
-   def __call__(self, unconditional_context, context, latent, timestep, alphas, alphas_prev, guidance, masks, m_perc):
-      e_ts = self.get_model_output(unconditional_context, context, latent, timestep, guidance)
-      x_prev = self.get_x_prev_and_pred_x0(latent, e_ts[0], alphas, alphas_prev)[0] * (1-m_perc)
-      for idx, e_t in enumerate(e_ts[1:]):
-         x_prev += self.get_x_prev_and_pred_x0(latent, e_t, alphas, alphas_prev)[0] * (masks[idx] * m_perc)
+   def __call__(self, unconditional_context, context, latent, timestep, alphas, alphas_prev, guidance):
+      e_t = self.get_model_output(unconditional_context, context, latent, timestep, guidance)
+      x_prev, _ = self.get_x_prev_and_pred_x0(latent, e_t, alphas, alphas_prev)
       return x_prev.realize()
 
 # ** ldm.models.autoencoder.AutoencoderKL (done!)
@@ -595,17 +592,18 @@ if __name__ == "__main__":
    model = StableDiffusion()
 
    # load in weights
-   load_state_dict(model, torch_load(fetch('https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/resolve/main/sd-v1-4.ckpt', 'sd-v1-4.ckpt'))['state_dict'], strict=False, fp16=args.fp16)
+   # load_state_dict(model, torch_load(fetch('https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/resolve/main/sd-v1-4.ckpt', 'sd-v1-4.ckpt'))['state_dict'], strict=True, fp16=args.fp16)
+   # state_dict = safe_load('weights/realisticVisionV60B1_v60B1VAE.safetensors')
+   # state_dict['alphas_cumprod'] = torch_load(fetch('https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/resolve/main/sd-v1-4.ckpt', 'sd-v1-4.ckpt'))['state_dict']['alphas_cumprod']
+   # safe_save(state_dict, "weights/realisticVisionV6_withAlphasCumprod.safetensors")
+   load_state_dict(model, safe_load('weights/realisticVisionV6_withAlphasCumprod.safetensors'), strict=True, fp16=args.fp16)
 
    # run through CLIP to get context
    tokenizer = ClipTokenizer()
-   contexts = []
+   # contexts = []
    chunks = ["forest, trees, leaves blowing in the wind", "ocean, water, waves blowing in the wind"]
-   for text in chunks + [", ".join(chunks)]:
-      prompt = Tensor([tokenizer.encode(f"high quality photograph of {text}, 8k")])
-      contexts.append(model.cond_stage_model.transformer.text_model(prompt).realize())
-
-   masks = [Tensor.ones(1,4,32,64).pad((None,None,(32,0),None)), Tensor.ones(1,4,32,64).pad((None,None,(0,32),None))]
+   prompt = Tensor([tokenizer.encode(f"high quality photograph of {chunks[0]}, 8k")])
+   context = model.cond_stage_model.transformer.text_model(prompt).realize()
 
    prompt = Tensor([tokenizer.encode("")])
    unconditional_context = model.cond_stage_model.transformer.text_model(prompt).realize()
@@ -633,7 +631,7 @@ if __name__ == "__main__":
          t.set_description("%3d %3d" % (index, timestep))
          with Timing("step in ", enabled=args.timing, on_exit=lambda _: f", using {GlobalCounters.mem_used/1e9:.2f} GB"):
             tid = Tensor([index])
-            latent = run(model, unconditional_context, contexts, latent, Tensor([timestep]), alphas[tid], alphas_prev[tid], Tensor([args.guidance]), masks, ((args.steps-index)/args.steps)**0.5)
+            latent = run(model, unconditional_context, context, latent, Tensor([timestep]), alphas[tid], alphas_prev[tid], Tensor([args.guidance]))
             if args.timing: Device[Device.DEFAULT].synchronize()
       del run
 

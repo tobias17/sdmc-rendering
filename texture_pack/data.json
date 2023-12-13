@@ -1,5 +1,5 @@
 {
-	"index": 4,
+	"index": 16,
 	"entries": [
 		{
 			"pattern": "oak_log.png",
@@ -35,6 +35,114 @@
 				0,
 				0,
 				3
+			]
+		},
+		{
+			"pattern": "ohjiuagwhoijg",
+			"prompt": "sky, clear blue sky",
+			"color": [
+				0,
+				0,
+				4
+			]
+		},
+		{
+			"pattern": "grass",
+			"prompt": "grass, field of grass blowing in the wind",
+			"color": [
+				0,
+				0,
+				5
+			]
+		},
+		{
+			"pattern": "poppy",
+			"prompt": "poppy, red flower, rose",
+			"color": [
+				0,
+				0,
+				6
+			]
+		},
+		{
+			"pattern": "dandelion",
+			"prompt": "dandelion, yellow flower",
+			"color": [
+				0,
+				0,
+				7
+			]
+		},
+		{
+			"pattern": "^sand.png",
+			"prompt": "sand, yellow beach sand, desert sand",
+			"color": [
+				0,
+				0,
+				8
+			]
+		},
+		{
+			"pattern": "acacia log",
+			"prompt": "acacia tree, acacia bark, wood",
+			"color": [
+				0,
+				0,
+				9
+			]
+		},
+		{
+			"pattern": "acacia leaves",
+			"prompt": "acacia leaves, canopy of leaves on acacia tree",
+			"color": [
+				0,
+				0,
+				10
+			]
+		},
+		{
+			"pattern": "gravel",
+			"prompt": "gravel",
+			"color": [
+				0,
+				0,
+				11
+			]
+		},
+		{
+			"pattern": "coal_ore.png",
+			"prompt": "coal ore, veins of coal embedded in stone",
+			"color": [
+				0,
+				0,
+				12
+			]
+		},
+		{
+			"pattern": "andesite",
+			"prompt": "andesite, stone made of andesite",
+			"color": [
+				0,
+				0,
+				13
+			]
+		},
+		{
+			"pattern": "^oak_leaves",
+			"prompt": "oak leaves, canopy of leaves on oak tree",
+			"color": [
+				0,
+				0,
+				14
+			]
+		},
+		{
+			"pattern": "iron_ore",
+			"prompt": "iron ore, veins of raw iron embedded in stone",
+			"color": [
+				0,
+				0,
+				15
 			]
 		}
 	]

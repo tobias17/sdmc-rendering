@@ -1,1 +1,2 @@
-sdmc-attn-mask/
+sdmc-attn-mask/*
+!sdmc-attn-mask/pack.mcmeta

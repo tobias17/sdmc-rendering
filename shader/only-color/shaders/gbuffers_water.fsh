@@ -3,5 +3,8 @@
 layout(location = 0) out vec4 color_fs;
 
 void main() {
-    color_fs = vec4(61.0/255.0, 230.0/255.0, 250.0/255.0, 1.0);
+    vec3 seg_map_color   = vec3(61.0/255.0, 230.0/255.0, 250.0/255.0);
+    vec3 attn_mask_color = vec3( 0.0/255.0,   0.0/255.0,   3.0/255.0);
+
+    color_fs = vec4(attn_mask_color, 1.0);
 }

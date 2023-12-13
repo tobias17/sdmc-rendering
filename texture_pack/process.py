@@ -32,7 +32,7 @@ def main():
    if root_dir is None or not os.path.exists(root_dir):
       raise ValueError(f"Could not find root_dir '{root_dir}', make sure the env var is set to a valid version root folder")
 
-   save_dir = f"texture_pack/sdmc/{texture_dir}"
+   save_dir = f"texture_pack/sdmc-color-codes/{texture_dir}"
    if not os.path.exists(save_dir):
       os.makedirs(save_dir)
 

@@ -1,0 +1,41 @@
+{
+	"index": 4,
+	"entries": [
+		{
+			"pattern": "oak_log.png",
+			"prompt": "oak tree, oak bark",
+			"color": [
+				0,
+				0,
+				0
+			]
+		},
+		{
+			"pattern": "^stone.png",
+			"prompt": "stone, rock",
+			"color": [
+				0,
+				0,
+				1
+			]
+		},
+		{
+			"pattern": "dirt",
+			"prompt": "dirt, soil",
+			"color": [
+				0,
+				0,
+				2
+			]
+		},
+		{
+			"pattern": "water",
+			"prompt": "water, river, ocean",
+			"color": [
+				0,
+				0,
+				3
+			]
+		}
+	]
+}

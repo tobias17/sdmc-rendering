@@ -7,6 +7,9 @@ nl = "\n"
 def lsw(str, pat):
    return str.lower().startswith(pat)
 
+def filter_with_pattern(pat, names):
+   return [f for f in names if all(f.startswith(p[1:]) if p.startswith("^") else p.lower() in f.lower() for p in pat.split(" "))]
+
 def main():
    texture_dir = "assets/minecraft/textures/block"
 
@@ -18,9 +21,9 @@ def main():
    if not os.path.exists(save_dir):
       os.makedirs(save_dir)
 
-   all_filenames = os.listdir(f"{root_dir}/{texture_dir}")
+   all_filenames = [f for f in os.listdir(f"{root_dir}/{texture_dir}") if f.endswith(".png")]
 
-   data_filepath = "data.json"
+   data_filepath = "texture_pack/data.json"
    if os.path.exists(data_filepath):
       with open(data_filepath) as f:
          data = json.load(f)
@@ -28,18 +31,18 @@ def main():
       data = { "index": 0, "entries": [] }
 
    while True:
-      text = input("[p]attern, [q]uit: ")
-      if text.lsw("q"):
+      text = input("[p]attern, [r]ender, [q]uit: ")
+      if lsw(text, "q"):
          return
-      elif text.lsw("p"):
+      elif lsw(text, "p"):
          is_pat = True
          while is_pat:
             pattern = input("Enter your pattern: ")
-            pattern_files = [f for f in all_filenames if pattern in all_filenames]
-            print(f"Pattern would produce:\n{nl.join(pattern_files)}")
+            pattern_files = filter_with_pattern(pattern, all_filenames)
+            print(f"\nPattern would produce:\n{nl.join(pattern_files)}")
             while True:
                text = input("[s]ave, [a]gain, [e]xit: ")
-               if text.lsw("s"):
+               if lsw(text, "s"):
                   prompt = input("Enter a prompt: ")
                   data["entries"].append({
                      "pattern": pattern,
@@ -51,11 +54,21 @@ def main():
                      json.dump(data, f, indent="\t")
                   is_pat = False
                   break
-               elif text.lsw("a"):
+               elif lsw(text, "a"):
                   break
                else:
                   is_pat = False
                   break
+      elif lsw(text, "r"):
+         rem_filenames = set(all_filenames.copy())
+         for entry in data["entries"]:
+            entry_filenames = filter_with_pattern(entry["pattern"], rem_filenames)
+            for filename in entry_filenames:
+               img = cv2.imread(f"{root_dir}/{texture_dir}/{filename}", cv2.IMREAD_UNCHANGED)
+               img[:,:,:3] = entry["color"][::-1]
+               cv2.imwrite(f"{save_dir}/{filename}", img)
+            rem_filenames -= set(entry_filenames)
+
 
 
 if __name__ == "__main__":

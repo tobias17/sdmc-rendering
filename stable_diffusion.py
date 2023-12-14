@@ -3,15 +3,16 @@
 # https://github.com/tinygrad/tinygrad/blob/master/examples/stable_diffusion.py
 import tempfile
 from pathlib import Path
-import gzip, argparse, math, re
+import gzip, argparse, math, re, cv2, json
 from functools import lru_cache
 from collections import namedtuple
 from typing import Optional, List
+from scipy import stats
 
 from tqdm import tqdm
 from tinygrad.tensor import Tensor
 from tinygrad import Device
-from tinygrad.helpers import dtypes, GlobalCounters, Timing, Context, getenv, fetch, DEBUG, CI
+from tinygrad.helpers import dtypes, GlobalCounters, Timing, Context, getenv, fetch, prod
 from tinygrad.nn import Conv2d, Linear, GroupNorm, LayerNorm, Embedding
 from tinygrad.nn.state import torch_load, load_state_dict, get_state_dict, safe_load, safe_save
 from tinygrad.jit import TinyJit
@@ -174,13 +175,13 @@ class CrossAttention:
       self.head_size = d_head
       self.to_out = [Linear(n_heads*d_head, query_dim)]
 
-   def __call__(self, x:Tensor, context:Optional[Tensor]=None, attn_mask=None) -> Tensor:
+   def __call__(self, x:Tensor, context:Optional[Tensor]=None) -> Tensor:
       if context is not None:
          z = 0
       context = x if context is None else context
       q,k,v = self.to_q(x), self.to_k(context), self.to_v(context)
       q,k,v = [y.reshape(x.shape[0], -1, self.num_heads, self.head_size).transpose(1,2) for y in (q,k,v)]
-      attention = Tensor.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask).transpose(1,2)
+      attention = Tensor.scaled_dot_product_attention(q, k, v).transpose(1,2)
       h_ = attention.reshape(x.shape[0], -1, self.num_heads * self.head_size)
       return h_.sequential(self.to_out)
 
@@ -213,9 +214,9 @@ class BasicTransformerBlock:
       self.norm2 = LayerNorm(dim)
       self.norm3 = LayerNorm(dim)
 
-   def __call__(self, x, context=None, attn_mask=None):
+   def __call__(self, x, context=None):
       x = self.attn1(self.norm1(x)) + x
-      x = self.attn2(self.norm2(x), context=context, attn_mask=attn_mask) + x
+      x = self.attn2(self.norm2(x), context=context) + x
       x = self.ff(self.norm3(x)) + x
       return x
 
@@ -228,14 +229,14 @@ class SpatialTransformer:
       self.proj_out = Conv2d(n_heads * d_head, channels, 1)
       self.index = index
 
-   def __call__(self, x, context=None, attn_mask=None):
+   def __call__(self, x, context=None):
       b, c, h, w = x.shape
       x_in = x
       x = self.norm(x)
       x = self.proj_in(x)
       x = x.reshape(b, c, h*w).permute(0,2,1)
       for block in self.transformer_blocks:
-         x = block(x, context=context, attn_mask=attn_mask)
+         x = block(x, context=context)
       x = x.permute(0,2,1).reshape(b, c, h, w)
       ret = self.proj_out(x) + x_in
       return ret
@@ -308,14 +309,14 @@ class UNetModel:
          Conv2d(320, 4, kernel_size=3, padding=1)
       ]
 
-   def __call__(self, x:Tensor, timesteps:Optional[Tensor]=None, context:Optional[Tensor]=None, attn_masks:List[Tensor]=[]):
+   def __call__(self, x:Tensor, timesteps:Optional[Tensor]=None, context:Optional[Tensor]=None):
       # TODO: real time embedding
       t_emb = timestep_embedding(timesteps, 320)
       emb = t_emb.sequential(self.time_embed)
 
       def run(x, bb):
          if isinstance(bb, ResBlock): x = bb(x, emb)
-         elif isinstance(bb, SpatialTransformer): x = bb(x, context, attn_masks[bb.index])
+         elif isinstance(bb, SpatialTransformer): x = bb(x, context)
          else: x = bb(x)
          return x
 
@@ -539,9 +540,9 @@ class StableDiffusion:
       x_prev = a_prev.sqrt() * pred_x0 + dir_xt
       return x_prev, pred_x0
 
-   def get_model_output(self, unconditional_context, context, latent, timestep, unconditional_guidance_scale, attn_masks):
+   def get_model_output(self, unconditional_context, context, latent, timestep, unconditional_guidance_scale):
       # put into diffuser
-      latents = self.model.diffusion_model(latent.expand(2, *latent.shape[1:]), timestep, unconditional_context.cat(context, dim=0), attn_masks)
+      latents = self.model.diffusion_model(latent.expand(2, *latent.shape[1:]), timestep, unconditional_context.cat(context, dim=0))
       unconditional_latent, latent = latents[0:1], latents[1:2]
 
       e_t = unconditional_latent + unconditional_guidance_scale * (latent - unconditional_latent)
@@ -556,8 +557,8 @@ class StableDiffusion:
       x = x.reshape(3,512,512).permute(1,2,0).clip(0,1)*255
       return x.cast(dtypes.uint8) if Device.DEFAULT != "WEBGPU" else x
 
-   def __call__(self, unconditional_context, context, latent, timestep, alphas, alphas_prev, guidance, attn_masks):
-      e_t = self.get_model_output(unconditional_context, context, latent, timestep, guidance, attn_masks)
+   def __call__(self, unconditional_context, context, latent, timestep, alphas, alphas_prev, guidance):
+      e_t = self.get_model_output(unconditional_context, context, latent, timestep, guidance)
       x_prev, _ = self.get_x_prev_and_pred_x0(latent, e_t, alphas, alphas_prev)
       return x_prev.realize()
 
@@ -600,26 +601,65 @@ if __name__ == "__main__":
    # safe_save(state_dict, "weights/realisticVisionV6_withAlphasCumprod.safetensors")
    load_state_dict(model, safe_load('weights/realisticVisionV6_withAlphasCumprod.safetensors'), strict=True, fp16=args.fp16)
 
+
+
+   # seen = set() # type: ignore
+   # segments = [] # type: ignore
+   # img = cv2.imread("mask_segments.png")
+   # assert img.shape == (512,512,3)
+   # for sz in [64, 32, 16, 8]:
+   #    delta = 512 // sz
+   #    segments.append([])
+   #    for y in range(sz):
+   #       segments[-1].append([])
+   #       for x in range(sz):
+   #          ch = img[y*delta:(y+1)*delta,x*delta:(x+1)*delta,0]
+   #          m = stats.mode(img[y*delta:(y+1)*delta,x*delta:(x+1)*delta,0].flatten())[0]
+   #          if m not in seen: seen.add(m)
+   #          segments[-1][y].append(m)
+   # seen = list(seen) # type: ignore
+
+   with open("texture_pack/data.json") as f:
+      data = json.load(f)
+
+
    # run through CLIP to get context
    tokenizer = ClipTokenizer()
+
+   all_prompts: List[str] = []
+   for index, entry in enumerate(data["entries"]):
+      assert index == entry["color"][2]
+      all_prompts.append(entry["prompt"])
+   all_contexts: Tensor = model.cond_stage_model.transformer.text_model(Tensor([tokenizer.encode(p) for p in all_prompts])).realize()
+
+   emb = Embedding(all_contexts.shape[0], prod(all_contexts.shape[1:]))
+   emb.weight = all_contexts.reshape((all_contexts.shape[0],-1))
+
+   context = emb(Tensor.ones(1,1)).reshape((1,*all_contexts.shape[1:])).realize()
+   print("got CLIP context", context.shape)
+
    # contexts = []
-   chunks = ["forest, trees, leaves blowing in the wind", "ocean, water, waves blowing in the wind"]
-   contexts = []
-   for text in chunks:
-      prompt = Tensor([tokenizer.encode(f"high quality photograph of {text}, 8k")])
-      contexts.append(model.cond_stage_model.transformer.text_model(prompt).realize())
-   context = contexts[0].cat(*contexts[1:], dim=1)
+   # for index in seen:
+   #    for entry in data["entries"]:
+   #       if entry["color"][2] == index:
+   #          text = entry["prompt"]
+   #          break
+   #    else:
+   #       raise ValueError(f"Could not find index {index}")
+   #    prompt = Tensor([tokenizer.encode(f"high quality photograph of {text}, 8k")])
+   #    contexts.append(model.cond_stage_model.transformer.text_model(prompt).realize())
+   # context = contexts[0].cat(*contexts[1:], dim=1)
 
    prompt = Tensor([tokenizer.encode("")])
    unconditional_context = model.cond_stage_model.transformer.text_model(prompt).realize()
-   unconditional_context = unconditional_context.pad((None,(0,context.shape[1]-unconditional_context.shape[1]),None))
+   # unconditional_context = unconditional_context.pad((None,(0,context.shape[1]-unconditional_context.shape[1]),None))
    print("got unconditional CLIP context", unconditional_context.shape)
 
-   attn_masks: List[Tensor] = []
-   for sz in [64, 32, 16, 8]:
-      m1 = Tensor.ones(1,1,sz*sz,77).cat(Tensor.zeros(1,1,sz*sz,context.shape[1]-77), dim=-1)
-      m2 = Tensor.ones(1,1,sz,sz//2,77).pad((None,None,None,None,(0,77))).cat(Tensor.ones(1,1,sz,sz//2,77).pad((None,None,None,None,(77,0))), dim=-2)
-      attn_masks.append(m1.cat(m2.reshape(m1.shape)).cast(dtypes.bool).realize())
+   # attn_masks: List[Tensor] = []
+   # for index, sz in enumerate([64, 32, 16, 8]):
+   #    m1 = Tensor.ones(1,1,sz*sz,77).cat(Tensor.zeros(1,1,sz*sz,context.shape[1]-77), dim=-1)
+   #    # m2 = Tensor.ones(1,1,sz,sz//2,77).pad((None,None,None,None,(0,77))).cat(Tensor.ones(1,1,sz,sz//2,77).pad((None,None,None,None,(77,0))), dim=-2)
+   #    attn_masks.append(m1.cat(m2.reshape(m1.shape)).cast(dtypes.bool).realize())
 
    # done with clip model
    del model.cond_stage_model
@@ -643,7 +683,7 @@ if __name__ == "__main__":
          t.set_description("%3d %3d" % (index, timestep))
          with Timing("step in ", enabled=args.timing, on_exit=lambda _: f", using {GlobalCounters.mem_used/1e9:.2f} GB"):
             tid = Tensor([index])
-            latent = run(model, unconditional_context, context, latent, Tensor([timestep]), alphas[tid], alphas_prev[tid], Tensor([args.guidance]), attn_masks)
+            latent = run(model, unconditional_context, context, latent, Tensor([timestep]), alphas[tid], alphas_prev[tid], Tensor([args.guidance]))
             if args.timing: Device[Device.DEFAULT].synchronize()
       del run
 

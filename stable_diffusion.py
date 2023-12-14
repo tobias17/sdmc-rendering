@@ -176,14 +176,21 @@ class CrossAttention:
       self.to_out = [Linear(n_heads*d_head, query_dim)]
 
    def __call__(self, x:Tensor, context:Optional[Tensor]=None) -> Tensor:
-      if context is not None:
-         z = 0
-      context = x if context is None else context
-      q,k,v = self.to_q(x), self.to_k(context), self.to_v(context)
-      q,k,v = [y.reshape(x.shape[0], -1, self.num_heads, self.head_size).transpose(1,2) for y in (q,k,v)]
-      attention = Tensor.scaled_dot_product_attention(q, k, v).transpose(1,2)
-      h_ = attention.reshape(x.shape[0], -1, self.num_heads * self.head_size)
-      return h_.sequential(self.to_out)
+      if context is None:
+         context = x if context is None else context
+         q,k,v = self.to_q(x), self.to_k(context), self.to_v(context)
+         q,k,v = [y.reshape(x.shape[0], -1, self.num_heads, self.head_size).transpose(1,2) for y in (q,k,v)]
+         attention = Tensor.scaled_dot_product_attention(q, k, v).transpose(1,2)
+         h_ = attention.reshape(x.shape[0], -1, self.num_heads * self.head_size)
+         return h_.sequential(self.to_out)
+      else:
+         context = context.reshape((context.shape[0],-1,*context.shape[3:]))
+         x = x.reshape((*x.shape[:2],1,*x.shape[2:]))
+         q,k,v = self.to_q(x), self.to_k(context), self.to_v(context)
+         q,k,v = [y.reshape(*x.shape[:-2], -1, self.num_heads, self.head_size).permute((0,3,1,2,4)) for y in (q,k,v)]
+         attention = Tensor.scaled_dot_product_attention(q, k, v).permute((0,2,3,1,4))
+         h_ = attention.reshape(x.shape[0], -1, self.num_heads * self.head_size)
+         return h_.sequential(self.to_out)
 
 class GEGLU:
    def __init__(self, dim_in, dim_out):
@@ -314,9 +321,15 @@ class UNetModel:
       t_emb = timestep_embedding(timesteps, 320)
       emb = t_emb.sequential(self.time_embed)
 
+      contexts: List[Tensor] = [context]
+      for _ in range(3):
+         ctx = contexts[-1]
+         new_ctx = ctx.reshape((*ctx.shape[:1],ctx.shape[1]//2,-1,*ctx.shape[2:])).sum(axis=2).reshape((*ctx.shape[:1],ctx.shape[1]//2,ctx.shape[2]//2,-1,*ctx.shape[3:])).sum(axis=3).div(4)
+         contexts.append(new_ctx.realize())
+
       def run(x, bb):
          if isinstance(bb, ResBlock): x = bb(x, emb)
-         elif isinstance(bb, SpatialTransformer): x = bb(x, context)
+         elif isinstance(bb, SpatialTransformer): x = bb(x, contexts[bb.index])
          else: x = bb(x)
          return x
 
@@ -599,6 +612,7 @@ if __name__ == "__main__":
    # state_dict = safe_load('weights/realisticVisionV60B1_v60B1VAE.safetensors')
    # state_dict['alphas_cumprod'] = torch_load(fetch('https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/resolve/main/sd-v1-4.ckpt', 'sd-v1-4.ckpt'))['state_dict']['alphas_cumprod']
    # safe_save(state_dict, "weights/realisticVisionV6_withAlphasCumprod.safetensors")
+
    load_state_dict(model, safe_load('weights/realisticVisionV6_withAlphasCumprod.safetensors'), strict=True, fp16=args.fp16)
 
 
@@ -631,12 +645,15 @@ if __name__ == "__main__":
       assert index == entry["color"][2]
       all_prompts.append(entry["prompt"])
    all_contexts: Tensor = model.cond_stage_model.transformer.text_model(Tensor([tokenizer.encode(p) for p in all_prompts])).realize()
-
    emb = Embedding(all_contexts.shape[0], prod(all_contexts.shape[1:]))
    emb.weight = all_contexts.reshape((all_contexts.shape[0],-1))
 
-   context = emb(Tensor.ones(1,1)).reshape((1,*all_contexts.shape[1:])).realize()
+   sz = (1,64,64)
+   img = Tensor.ones(*sz)
+   context = emb(img.reshape(1,-1)).reshape((*sz,*all_contexts.shape[1:])).cast(dtypes.float16).realize()
    print("got CLIP context", context.shape)
+
+   del all_contexts, emb
 
    # contexts = []
    # for index in seen:
@@ -651,7 +668,8 @@ if __name__ == "__main__":
    # context = contexts[0].cat(*contexts[1:], dim=1)
 
    prompt = Tensor([tokenizer.encode("")])
-   unconditional_context = model.cond_stage_model.transformer.text_model(prompt).realize()
+   unconditional_context: Tensor = model.cond_stage_model.transformer.text_model(prompt)
+   unconditional_context = unconditional_context.reshape((1,1,*unconditional_context.shape)).expand(*context.shape).cast(dtypes.float16).realize()
    # unconditional_context = unconditional_context.pad((None,(0,context.shape[1]-unconditional_context.shape[1]),None))
    print("got unconditional CLIP context", unconditional_context.shape)
 
@@ -666,12 +684,12 @@ if __name__ == "__main__":
 
    timesteps = list(range(1, 1000, 1000//args.steps))
    print(f"running for {timesteps} timesteps")
-   alphas = model.alphas_cumprod[Tensor(timesteps)]
-   alphas_prev = Tensor([1.0]).cat(alphas[:-1])
+   alphas = model.alphas_cumprod[Tensor(timesteps, dtype=dtypes.float16)]
+   alphas_prev = Tensor([1.0], dtype=dtypes.float16).cat(alphas[:-1])
 
    # start with random noise
    if args.seed is not None: Tensor._seed = args.seed
-   latent = Tensor.randn(1,4,64,64)
+   latent = Tensor.randn(1,4,64,64, dtype=dtypes.float16)
 
    @TinyJit
    def run(model, *x): return model(*x).realize()
@@ -683,7 +701,7 @@ if __name__ == "__main__":
          t.set_description("%3d %3d" % (index, timestep))
          with Timing("step in ", enabled=args.timing, on_exit=lambda _: f", using {GlobalCounters.mem_used/1e9:.2f} GB"):
             tid = Tensor([index])
-            latent = run(model, unconditional_context, context, latent, Tensor([timestep]), alphas[tid], alphas_prev[tid], Tensor([args.guidance]))
+            latent = run(model, unconditional_context, context, latent, Tensor([timestep], dtype=dtypes.float16), alphas[tid], alphas_prev[tid], Tensor([args.guidance]))
             if args.timing: Device[Device.DEFAULT].synchronize()
       del run
 

@@ -7,15 +7,16 @@ import gzip, argparse, math, re, cv2, json
 from functools import lru_cache
 from collections import namedtuple
 from typing import Optional, List
-from scipy import stats
+from scipy import stats # type: ignore
+import numpy as np
 
-from tqdm import tqdm
-from tinygrad.tensor import Tensor
-from tinygrad import Device
-from tinygrad.helpers import dtypes, GlobalCounters, Timing, Context, getenv, fetch, prod
-from tinygrad.nn import Conv2d, Linear, GroupNorm, LayerNorm, Embedding
-from tinygrad.nn.state import torch_load, load_state_dict, get_state_dict, safe_load, safe_save
-from tinygrad.jit import TinyJit
+from tqdm import tqdm # type: ignore
+from tinygrad.tensor import Tensor # type: ignore
+from tinygrad import Device # type: ignore
+from tinygrad.helpers import dtypes, GlobalCounters, Timing, Context, getenv, fetch, prod # type: ignore
+from tinygrad.nn import Conv2d, Linear, GroupNorm, LayerNorm, Embedding # type: ignore
+from tinygrad.nn.state import torch_load, load_state_dict, get_state_dict, safe_load, safe_save # type: ignore
+from tinygrad.jit import TinyJit # type: ignore
 
 Device.DEFAULT = "CUDA"
 # Device.DEFAULT = "CPU"
@@ -470,7 +471,7 @@ class ClipTokenizer:
       self.byte_encoder = bytes_to_unicode()
       merges = gzip.open(bpe_path).read().decode("utf-8").split('\n')
       merges = merges[1:49152-256-2+1]
-      merges = [tuple(merge.split()) for merge in merges]
+      merges = [tuple(merge.split()) for merge in merges] # type: ignore
       vocab = list(bytes_to_unicode().values())
       vocab = vocab + [v+'</w>' for v in vocab]
       for merge in merges:
@@ -619,7 +620,6 @@ if __name__ == "__main__":
 
    # seen = set() # type: ignore
    # segments = [] # type: ignore
-   # img = cv2.imread("mask_segments.png")
    # assert img.shape == (512,512,3)
    # for sz in [64, 32, 16, 8]:
    #    delta = 512 // sz
@@ -633,9 +633,11 @@ if __name__ == "__main__":
    #          segments[-1][y].append(m)
    # seen = list(seen) # type: ignore
 
+
+
+
    with open("texture_pack/data.json") as f:
       data = json.load(f)
-
 
    # run through CLIP to get context
    tokenizer = ClipTokenizer()
@@ -648,39 +650,30 @@ if __name__ == "__main__":
    emb = Embedding(all_contexts.shape[0], prod(all_contexts.shape[1:]))
    emb.weight = all_contexts.reshape((all_contexts.shape[0],-1))
 
-   sz = (1,64,64)
-   img = Tensor.ones(*sz)
-   context = emb(img.reshape(1,-1)).reshape((*sz,*all_contexts.shape[1:])).cast(dtypes.float16).realize()
+   img = cv2.imread("mask_segments.png")
+   sz = (1,512,512)
+   assert img.shape == (512,512,3)
+   div = 512//64
+
+   ctx_np = np.zeros((1,64,64,77,768), dtype=np.float16)
+   for i in range(64):
+      e = emb(Tensor(img[i*div:(i+1)*div,:,0]).reshape(1,-1)).reshape((div,512,*all_contexts.shape[1:]))
+      ctx_np[0,i,:,:,:] = e.sum(axis=0).reshape((e.shape[1]//div,div,*e.shape[2:])).sum(axis=1).div(div*div).numpy()
+      del e
+   context = Tensor(ctx_np, dtype=dtypes.float16).realize()
+
+   # ctx = emb(Tensor(img[:,:,0]).reshape(1,-1)).reshape((*sz,*all_contexts.shape[1:]))
+   # context = ctx.reshape((*ctx.shape[:1],ctx.shape[1]//div,-1,*ctx.shape[2:])).sum(axis=2).reshape((*ctx.shape[:1],ctx.shape[1]//div,ctx.shape[2]//div,-1,*ctx.shape[3:])).sum(axis=3).div(div*div)
+   # context = context.cast(dtypes.float16).realize()
    print("got CLIP context", context.shape)
-
-   del all_contexts, emb
-
-   # contexts = []
-   # for index in seen:
-   #    for entry in data["entries"]:
-   #       if entry["color"][2] == index:
-   #          text = entry["prompt"]
-   #          break
-   #    else:
-   #       raise ValueError(f"Could not find index {index}")
-   #    prompt = Tensor([tokenizer.encode(f"high quality photograph of {text}, 8k")])
-   #    contexts.append(model.cond_stage_model.transformer.text_model(prompt).realize())
-   # context = contexts[0].cat(*contexts[1:], dim=1)
 
    prompt = Tensor([tokenizer.encode("")])
    unconditional_context: Tensor = model.cond_stage_model.transformer.text_model(prompt)
    unconditional_context = unconditional_context.reshape((1,1,*unconditional_context.shape)).expand(*context.shape).cast(dtypes.float16).realize()
-   # unconditional_context = unconditional_context.pad((None,(0,context.shape[1]-unconditional_context.shape[1]),None))
    print("got unconditional CLIP context", unconditional_context.shape)
 
-   # attn_masks: List[Tensor] = []
-   # for index, sz in enumerate([64, 32, 16, 8]):
-   #    m1 = Tensor.ones(1,1,sz*sz,77).cat(Tensor.zeros(1,1,sz*sz,context.shape[1]-77), dim=-1)
-   #    # m2 = Tensor.ones(1,1,sz,sz//2,77).pad((None,None,None,None,(0,77))).cat(Tensor.ones(1,1,sz,sz//2,77).pad((None,None,None,None,(77,0))), dim=-2)
-   #    attn_masks.append(m1.cat(m2.reshape(m1.shape)).cast(dtypes.bool).realize())
-
    # done with clip model
-   del model.cond_stage_model
+   del model.cond_stage_model, all_contexts, emb
 
    timesteps = list(range(1, 1000, 1000//args.steps))
    print(f"running for {timesteps} timesteps")
@@ -710,7 +703,7 @@ if __name__ == "__main__":
    print(x.shape)
 
    # save image
-   from PIL import Image
+   from PIL import Image # type: ignore
    import numpy as np
    im = Image.fromarray(x.numpy().astype(np.uint8, copy=False))
    print(f"saving {args.out}")
